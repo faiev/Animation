@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05070b">
+<title>Redis Story — From Repeated Database Reads to Cache Hits</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: #05070b; }
+  body {
+    min-height: 100vh; display: grid; place-items: center; padding: 18px;
+    color: #edf3f8; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .stage { width: min(100%, 1440px); }
+  svg { display: block; width: 100%; height: auto; overflow: visible; cursor: pointer; }
+  .hint { color:#74808e; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align:center; margin-top:8px; letter-spacing:.08em; }
+  @media (prefers-reduced-motion: reduce) { .hint::after { content:" · reduced-motion preference detected"; } }
+</style>
+</head>
+<body>
+<main class="stage">
+<svg id="scene" viewBox="0 0 1280 720" role="img" aria-label="An animated story explaining Redis cache-aside: repeated database reads before Redis, the first cache miss, fast cache hits, and cache invalidation after a write.">
+  <defs>
+    <filter id="glow-cyan" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="glow-green" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="glow-orange" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="arrow-muted" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#526170"/></marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#ffad66"/></marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#50dfa2"/></marker>
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#35d5f4"/></marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#b4a0ff"/></marker>
+    <linearGradient id="bar-green" x1="0" x2="1"><stop offset="0" stop-color="#35d5f4"/><stop offset="1" stop-color="#50dfa2"/></linearGradient>
+    <linearGradient id="bar-orange" x1="0" x2="1"><stop offset="0" stop-color="#ffad66"/><stop offset="1" stop-color="#ff7078"/></linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="#05070b"/>
+  <path d="M64 54H112" stroke="#50dfa2" stroke-width="3" stroke-linecap="round"/>
+  <text x="126" y="58" fill="#8493a1" font-family="ui-monospace,monospace" font-size="11" font-weight="700" letter-spacing="2.3">REDIS IN PRACTICE  /  STORY 01</text>
+  <text x="1210" y="58" fill="#50dfa2" font-family="ui-monospace,monospace" font-size="11" font-weight="800" text-anchor="end" letter-spacing="2">CACHE-ASIDE</text>
+  <text x="64" y="112" fill="#edf3f8" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="39" font-weight="800" letter-spacing="-.8">THE SAME DATA. AGAIN. AND AGAIN.</text>
+  <text id="top-subtitle" x="67" y="145" fill="#9ba9b6" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="15">What changes when a fast memory layer joins the system?</text>
+
+  <!-- main stage -->
+  <rect x="64" y="176" width="1152" height="402" rx="19" fill="#091018" stroke="#263441" stroke-width="1.4"/>
+  <rect x="80" y="192" width="1120" height="370" rx="13" fill="none" stroke="#17232e" stroke-width="1" stroke-dasharray="3 7"/>
+  <text x="91" y="218" fill="#738291" font-family="ui-monospace,monospace" font-size="10" font-weight="700" letter-spacing="1.8">REQUEST JOURNEY</text>
+  <g id="chapter-chip"><rect x="1035" y="196" width="145" height="26" rx="13" fill="#211912" stroke="#8e5a32"/><text id="chapter-chip-text" x="1107" y="213" fill="#ffad66" font-family="ui-monospace,monospace" font-size="10" font-weight="800" text-anchor="middle" letter-spacing="1">NO CACHE</text></g>
+
+  <!-- routes are behind the system nodes -->
+  <path id="users-app" d="M300 367 C330 367 351 367 385 367" fill="none" stroke="#526170" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-muted)"/>
+  <path id="direct-forward" d="M565 343 C690 343 850 343 980 343" fill="none" stroke="#526170" stroke-width="2.2" stroke-linecap="round" marker-end="url(#arrow-muted)"/>
+  <path id="direct-return" d="M980 414 C840 458 700 458 565 414" fill="none" stroke="#526170" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-muted)"/>
+  <path id="app-redis" d="M565 343 C606 343 630 343 675 343" fill="none" stroke="#50dfa2" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrow-green)"/>
+  <path id="redis-db" d="M885 343 C922 343 946 343 980 343" fill="none" stroke="#ffad66" stroke-width="2.2" stroke-linecap="round" marker-end="url(#arrow-orange)"/>
+  <path id="db-redis" d="M980 414 C945 436 920 436 885 414" fill="none" stroke="#ffad66" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-orange)"/>
+  <path id="redis-app" d="M675 414 C633 438 607 438 565 414" fill="none" stroke="#50dfa2" stroke-width="2.2" stroke-linecap="round" marker-end="url(#arrow-green)"/>
+
+  <!-- users -->
+  <g id="users-node">
+    <rect x="91" y="267" width="209" height="199" rx="12" fill="#101923" stroke="#354350" stroke-width="1.2"/>
+    <circle cx="109" cy="289" r="3.5" fill="#35d5f4"/>
+    <text x="121" y="293" fill="#b7c4cf" font-family="ui-monospace,monospace" font-size="10" font-weight="800" letter-spacing="1.2">CLIENT REQUESTS</text>
+    <g id="user-row-1"><circle cx="116" cy="330" r="11" fill="#1d3540" stroke="#35d5f4"/><circle cx="116" cy="326" r="3.2" fill="#35d5f4"/><path d="M109 337Q116 329 123 337" fill="none" stroke="#35d5f4" stroke-width="1.8" stroke-linecap="round"/><text x="137" y="327" fill="#edf3f8" font-family="ui-monospace,monospace" font-size="10" font-weight="700">VISITOR 01</text><text x="137" y="342" fill="#8493a1" font-family="ui-monospace,monospace" font-size="9">GET /products/42</text></g>
+    <g id="user-row-2"><circle cx="116" cy="383" r="11" fill="#1d3540" stroke="#35d5f4"/><circle cx="116" cy="379" r="3.2" fill="#35d5f4"/><path d="M109 390Q116 382 123 390" fill="none" stroke="#35d5f4" stroke-width="1.8" stroke-linecap="round"/><text x="137" y="380" fill="#edf3f8" font-family="ui-monospace,monospace" font-size="10" font-weight="700">VISITOR 02</text><text x="137" y="395" fill="#8493a1" font-family="ui-monospace,monospace" font-size="9">GET /products/42</text></g>
+    <g id="user-row-3"><circle cx="116" cy="436" r="11" fill="#1d3540" stroke="#35d5f4"/><circle cx="116" cy="432" r="3.2" fill="#35d5f4"/><path d="M109 443Q116 435 123 443" fill="none" stroke="#35d5f4" stroke-width="1.8" stroke-linecap="round"/><text x="137" y="433" fill="#edf3f8" font-family="ui-monospace,monospace" font-size="10" font-weight="700">VISITOR 03</text><text x="137" y="448" fill="#8493a1" font-family="ui-monospace,monospace" font-size="9">GET /products/42</text></g>
+    <text x="195" y="485" fill="#647483" font-family="ui-monospace,monospace" font-size="9" text-anchor="middle">SAME POPULAR PRODUCT</text>
+  </g>
+
+  <!-- app -->
+  <g id="app-node">
+    <rect x="385" y="285" width="180" height="160" rx="13" fill="#101923" stroke="#42515f" stroke-width="1.4"/>
+    <rect x="402" y="302" width="146" height="20" rx="6" fill="#182431"/>
+    <circle cx="414" cy="312" r="3" fill="#35d5f4"/>
+    <text x="425" y="316" fill="#9cb0bf" font-family="ui-monospace,monospace" font-size="9" font-weight="800" letter-spacing="1">YOUR APPLICATION</text>
+    <g transform="translate(405 342)"><rect width="140" height="42" rx="7" fill="#0b131b" stroke="#2d3d4a"/><text x="70" y="17" fill="#edf3f8" font-family="ui-monospace,monospace" font-size="10" font-weight="700" text-anchor="middle">GET product:42</text><text x="70" y="31" fill="#7e8d9a" font-family="ui-monospace,monospace" font-size="8.5" text-anchor="middle">PRODUCT API</text></g>
+    <rect id="app-status-bg" x="424" y="400" width="102" height="23" rx="11.5" fill="#211912" stroke="#8e5a32"/>
+    <text id="app-status" x="475" y="415" fill="#ffad66" font-family="ui-monospace,monospace" font-size="9" font-weight="800" text-anchor="middle" letter-spacing=".6">NO CACHE</text>
+  </g>
+
+  <!-- Redis cache, initially empty -->
+  <g id="redis-node" opacity="0">
+    <rect x="675" y="270" width="210" height="190" rx="13" fill="#0c1917" stroke="#3d9e79" stroke-width="1.5"/>
+    <rect x="692" y="287" width="176" height="21" rx="6" fill="#102923"/>
+    <circle cx="705" cy="297.5" r="3.5" fill="#50dfa2"/>
+    <text x="717" y="301" fill="#8ceac1" font-family="ui-monospace,monospace" font-size="10" font-weight="800" letter-spacing="1.5">REDIS</text>
+    <text x="858" y="301" fill="#588975" font-family="ui-monospace,monospace" font-size="8" font-weight="700" text-anchor="end">IN-MEMORY</text>
+    <g id="cache-empty"><rect x="694" y="326" width="172" height="82" rx="8" fill="#0a1413" stroke="#315a4a" stroke-dasharray="4 4"/><text x="780" y="359" fill="#7aa28f" font-family="ui-monospace,monospace" font-size="11" font-weight="800" text-anchor="middle">EMPTY</text><text x="780" y="378" fill="#617b6d" font-family="ui-monospace,monospace" font-size="9" text-anchor="middle">nothing cached yet</text></g>
+    <g id="cache-filled" opacity="0"><rect x="694" y="326" width="172" height="82" rx="8" fill="#10271f" stroke="#50dfa2"/><text x="707" y="345" fill="#8ceac1" font-family="ui-monospace,monospace" font-size="9" font-weight="800">product:42</text><text x="707" y="365" fill="#edf3f8" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="12" font-weight="700">Trail Runner</text><text id="cache-price" x="707" y="383" fill="#a1b8aa" font-family="ui-monospace,monospace" font-size="9">$89.00  ·  TTL 60s</text></g>
+    <rect id="redis-status-bg" x="725" y="420" width="110" height="22" rx="11" fill="#14251f" stroke="#3d9e79"/>
+    <text id="redis-status" x="780" y="435" fill="#8ceac1" font-family="ui-monospace,monospace" font-size="9" font-weight="800" text-anchor="middle" letter-spacing=".7">CACHE EMPTY</text>
+  </g>
+
+  <!-- primary DB -->
+  <g id="db-node">
+    <rect x="980" y="285" width="220" height="160" rx="13" fill="#171713" stroke="#9a714b" stroke-width="1.3"/>
+    <rect x="997" y="302" width="186" height="21" rx="6" fill="#292017"/>
+    <circle cx="1010" cy="312.5" r="3.5" fill="#ffad66"/>
+    <text x="1022" y="316" fill="#e0b88e" font-family="ui-monospace,monospace" font-size="9.5" font-weight="800" letter-spacing=".8">PRIMARY DATABASE</text>
+    <g transform="translate(1000 337)">
+      <rect width="180" height="77" rx="7" fill="#100f0d" stroke="#54402d"/>
+      <path d="M0 23H180 M0 48H180" stroke="#382d22" stroke-width="1"/>
+      <path d="M61 0V77" stroke="#382d22" stroke-width="1"/>
+      <text x="11" y="16" fill="#9c866f" font-family="ui-monospace,monospace" font-size="8.5">id</text><text x="72" y="16" fill="#9c866f" font-family="ui-monospace,monospace" font-size="8.5">product</text>
+      <text x="11" y="40" fill="#f2c08e" font-family="ui-monospace,monospace" font-size="10" font-weight="700">42</text><text x="72" y="40" fill="#e9ded2" font-family="ui-monospace,monospace" font-size="9.5">Trail Runner</text>
+      <text x="11" y="65" fill="#9c866f" font-family="ui-monospace,monospace" font-size="8.5">price</text><text id="db-price" x="72" y="65" fill="#e9ded2" font-family="ui-monospace,monospace" font-size="9.5">$89.00</text>
+    </g>
+    <text x="1090" y="433" fill="#9b7958" font-family="ui-monospace,monospace" font-size="8.5" font-weight="700" text-anchor="middle" letter-spacing=".7">SOURCE OF TRUTH</text>
+  </g>
+
+  <!-- route labels -->
+  <g id="direct-label"><rect x="690" y="310" width="165" height="22" rx="11" fill="#211912" stroke="#714b2d"/><text x="772.5" y="325" fill="#ffbd83" font-family="ui-monospace,monospace" font-size="9" font-weight="800" text-anchor="middle" letter-spacing=".6">REPEATED DB LOOKUP</text></g>
+  <g id="cache-route-label" opacity="0"><rect x="586" y="310" width="93" height="22" rx="11" fill="#10251d" stroke="#3d9e79"/><text x="632.5" y="325" fill="#8ceac1" font-family="ui-monospace,monospace" font-size="9" font-weight="800" text-anchor="middle">GET / SET</text></g>
+  <g id="db-route-label" opacity="0"><rect x="891" y="310" width="84" height="22" rx="11" fill="#211912" stroke="#714b2d"/><text x="933" y="325" fill="#ffbd83" font-family="ui-monospace,monospace" font-size="9" font-weight="800" text-anchor="middle">MISS ONLY</text></g>
+
+  <!-- animated packets -->
+  <circle id="packet-user" r="5.5" fill="#35d5f4" stroke="#d5f9ff" stroke-width="1.2" opacity="0" filter="url(#glow-cyan)"/>
+  <circle id="packet-main" r="6" fill="#ffad66" stroke="#fff0dc" stroke-width="1.2" opacity="0" filter="url(#glow-orange)"/>
+  <circle id="packet-cache" r="6" fill="#50dfa2" stroke="#e1fff0" stroke-width="1.2" opacity="0" filter="url(#glow-green)"/>
+  <circle id="packet-return" r="5.5" fill="#35d5f4" stroke="#d5f9ff" stroke-width="1.2" opacity="0" filter="url(#glow-cyan)"/>
+  <circle id="packet-write" r="6" fill="#b4a0ff" stroke="#eee8ff" stroke-width="1.2" opacity="0"/>
+
+  <!-- compact story metrics -->
+  <g id="metric-db">
+    <rect x="91" y="500" width="320" height="58" rx="9" fill="#0e151c" stroke="#34414d"/>
+    <text x="108" y="520" fill="#93a2af" font-family="ui-monospace,monospace" font-size="9" font-weight="800" letter-spacing="1">PRIMARY DB READS</text>
+    <text id="db-count" x="108" y="546" fill="#ffad66" font-family="ui-monospace,monospace" font-size="21" font-weight="800">0</text>
+    <g id="db-bars" transform="translate(190 530)"><rect class="dbbar" x="0" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/><rect class="dbbar" x="31" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/><rect class="dbbar" x="62" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/><rect class="dbbar" x="93" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/><rect class="dbbar" x="124" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/><rect class="dbbar" x="155" y="0" width="25" height="12" rx="3" fill="#ffad66" opacity=".15"/></g>
+  </g>
+  <g id="metric-hits">
+    <rect x="480" y="500" width="320" height="58" rx="9" fill="#0e151c" stroke="#34414d"/>
+    <text x="497" y="520" fill="#93a2af" font-family="ui-monospace,monospace" font-size="9" font-weight="800" letter-spacing="1">REDIS CACHE HITS</text>
+    <text id="hit-count" x="497" y="546" fill="#50dfa2" font-family="ui-monospace,monospace" font-size="21" font-weight="800">0</text>
+    <g id="hit-bars" transform="translate(579 530)"><rect class="hitbar" x="0" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/><rect class="hitbar" x="31" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/><rect class="hitbar" x="62" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/><rect class="hitbar" x="93" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/><rect class="hitbar" x="124" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/><rect class="hitbar" x="155" y="0" width="25" height="12" rx="3" fill="#50dfa2" opacity=".13"/></g>
+  </g>
+  <g id="metric-path">
+    <rect x="869" y="500" width="311" height="58" rx="9" fill="#0e151c" stroke="#34414d"/>
+    <text x="886" y="520" fill="#93a2af" font-family="ui-monospace,monospace" font-size="9" font-weight="800" letter-spacing="1">WHERE THE READ IS SERVED</text>
+    <text id="path-state" x="886" y="545" fill="#ffad66" font-family="ui-monospace,monospace" font-size="13" font-weight="800">APPLICATION → DATABASE</text>
+  </g>
+
+  <!-- story strip -->
+  <text id="story-kicker" x="67" y="612" fill="#ffad66" font-family="ui-monospace,monospace" font-size="10" font-weight="800" letter-spacing="2">CHAPTER 01  /  BEFORE REDIS</text>
+  <text id="story-title" x="67" y="644" fill="#edf3f8" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="23" font-weight="800">Every request takes the long road.</text>
+  <text id="story-copy" x="67" y="669" fill="#9ba9b6" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="12.5">The app asks the primary database for the same popular product again — and again.</text>
+  <g id="timeline">
+    <rect x="895" y="633" width="285" height="4" rx="2" fill="#1c2934"/>
+    <rect id="timeline-fill" x="895" y="633" width="0" height="4" rx="2" fill="#50dfa2"/>
+    <text x="895" y="654" fill="#627181" font-family="ui-monospace,monospace" font-size="8.5">STORY PROGRESS</text>
+    <text id="time-readout" x="1180" y="654" fill="#8997a4" font-family="ui-monospace,monospace" font-size="8.5" text-anchor="end">00:00 / 00:52</text>
+  </g>
+  <text x="67" y="700" fill="#5e6b78" font-family="ui-monospace,monospace" font-size="9">CACHE-ASIDE: APP CHECKS REDIS → ON MISS, LOAD FROM DB → STORE IN REDIS → REUSE ON THE NEXT READ</text>
+  <text id="pause-label" x="1210" y="700" fill="#7b8996" font-family="ui-monospace,monospace" font-size="9" text-anchor="end">CLICK TO PAUSE</text>
+</svg>
+<div class="hint">CLICK THE SCENE TO PAUSE / RESUME · SPACEBAR ALSO WORKS · RESTARTS AFTER THE FINAL CHAPTER</div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const svg = document.getElementById('scene');
+  const $ = id => document.getElementById(id);
+  const clamp = (v,a=0,b=1) => Math.max(a,Math.min(b,v));
+  const ease = t => { t=clamp(t); return t*t*(3-2*t); };
+  const lerp = (a,b,t) => a+(b-a)*t;
+  const TOTAL = 52;
+  const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const paths = {};
+  ['users-app','direct-forward','direct-return','app-redis','redis-db','db-redis','redis-app'].forEach(id => paths[id] = $(id));
+  const packets = ['packet-user','packet-main','packet-cache','packet-return','packet-write'].map($);
+  const dbBars = [...document.querySelectorAll('.dbbar')];
+  const hitBars = [...document.querySelectorAll('.hitbar')];
+  let paused = reduced, elapsed = 0, last = 0;
+
+  const opacity = (id,v) => $(id).setAttribute('opacity',String(clamp(v)));
+  const setText = (id,value) => { if($(id).textContent !== String(value)) $(id).textContent = String(value); };
+  const setStyle = (id,attr,value) => $(id).setAttribute(attr,String(value));
+  const along = (id,packet,progress,visible=true,reverse=false) => {
+    const p = paths[id];
+    const len = p.getTotalLength();
+    const q = clamp(reverse ? 1-progress : progress) * len;
+    const pt = p.getPointAtLength(q);
+    setStyle(packet,'cx',pt.x); setStyle(packet,'cy',pt.y); opacity(packet,visible?1:0);
+  };
+  const hidePackets = () => packets.forEach(p => opacity(p.id,0));
+  const routeStyle = (id,stroke,op,marker,width=2.2) => {
+    const p = paths[id]; p.setAttribute('stroke',stroke); p.setAttribute('opacity',op); p.setAttribute('stroke-width',width); p.setAttribute('marker-end',`url(#${marker})`);
+  };
+  const setChapter = (label,color='#ffad66',bg='#211912',stroke='#8e5a32') => {
+    setText('chapter-chip-text',label);
+    $('chapter-chip').querySelector('rect').setAttribute('fill',bg);
+    $('chapter-chip').querySelector('rect').setAttribute('stroke',stroke);
+    $('chapter-chip-text').setAttribute('fill',color);
+  };
+  const setStory = (kicker,title,copy,color='#ffad66') => {
+    setText('story-kicker',kicker); setText('story-title',title); setText('story-copy',copy);
+    $('story-kicker').setAttribute('fill',color);
+  };
+  const dbReadCount = n => {
+    setText('db-count',n);
+    dbBars.forEach((b,i)=>b.setAttribute('opacity',i<Math.min(6,n) ? .95 : .14));
+  };
+  const cacheHitCount = n => {
+    setText('hit-count',n);
+    hitBars.forEach((b,i)=>b.setAttribute('opacity',i<Math.min(6,n) ? .95 : .14));
+  };
+  const appStatus = (label,kind) => {
+    setText('app-status',label);
+    const bg = kind==='hit'?'#10291f':kind==='miss'?'#2a2115':'#211912';
+    const st = kind==='hit'?'#3d9e79':kind==='miss'?'#a8783b':'#8e5a32';
+    const fg = kind==='hit'?'#8ceac1':kind==='miss'?'#ffc27e':'#ffad66';
+    setStyle('app-status-bg','fill',bg); setStyle('app-status-bg','stroke',st); setStyle('app-status','fill',fg);
+  };
+  const redisStatus = (label,kind) => {
+    setText('redis-status',label);
+    const bg = kind==='hit'?'#123326':kind==='miss'?'#2c2215':'#14251f';
+    const st = kind==='hit'?'#50dfa2':kind==='miss'?'#ad8046':'#3d9e79';
+    const fg = kind==='miss'?'#ffc27e':'#8ceac1';
+    setStyle('redis-status-bg','fill',bg); setStyle('redis-status-bg','stroke',st); setStyle('redis-status','fill',fg);
+  };
+  const cacheFill = v => { opacity('cache-filled',v); opacity('cache-empty',1-v); };
+  const setRedis = (v) => { opacity('redis-node',v); opacity('cache-route-label',v); opacity('db-route-label',v); };
+  const setProgress = t => {
+    setStyle('timeline-fill','width',285*clamp(t/TOTAL));
+    const s=Math.floor(t),m=String(Math.floor(s/60)).padStart(2,'0'),ss=String(s%60).padStart(2,'0');
+    setText('time-readout',`${m}:${ss} / 00:52`);
+  };
+
+  function draw(t) {
+    hidePackets();
+    const before = t < 12;
+    const setup = t >= 12 && t < 16;
+    const miss = t >= 16 && t < 26;
+    const hits = t >= 26 && t < 39;
+    const invalidate = t >= 39 && t < 47;
+    const recap = t >= 47;
+    setProgress(t);
+
+    // The architecture transforms from direct database reads to cache-aside.
+    setRedis(ease((t-12)/2.4));
+    const redisVisible = t >= 12;
+    opacity('direct-label', before ? 1 : 0);
+    const directOpacity = before ? 1 : invalidate ? .82 : setup ? 1-ease((t-12)/3) : 0.12;
+    const directColor = before ? '#ffad66' : invalidate ? '#b4a0ff' : '#596875';
+    const directMarker = before ? 'arrow-orange' : invalidate ? 'arrow-violet' : 'arrow-muted';
+    routeStyle('direct-forward',directColor,directOpacity,directMarker,before?2.8:invalidate?2.4:1.5);
+    routeStyle('direct-return',directColor,directOpacity*.82,directMarker,before?2.3:invalidate?2:1.4);
+    routeStyle('users-app','#35d5f4',.8,'arrow-cyan',2);
+    routeStyle('app-redis','#50dfa2',redisVisible?1:0,'arrow-green',2.4);
+    routeStyle('redis-db','#ffad66',redisVisible?((miss||invalidate)?1:.22):0,'arrow-orange',2.1);
+    routeStyle('db-redis','#ffad66',redisVisible?((miss||invalidate)?1:.16):0,'arrow-orange',1.9);
+    routeStyle('redis-app','#50dfa2',redisVisible?1:0,'arrow-green',2.3);
+
+    let dbReads=0, hitsCount=0;
+    if(before) {
+      const local=t;
+      dbReads=Math.min(6,Math.floor(local/1.8)+1);
+      setChapter('NO CACHE');
+      setStory('CHAPTER 01  /  BEFORE REDIS','Every request takes the long road.','The app asks the primary database for the same popular product again — and again.');
+      appStatus('NO CACHE','none');
+      setText('path-state','APPLICATION → DATABASE');
+      opacity('redis-node',0); opacity('cache-route-label',0); opacity('db-route-label',0);
+      // Repeating request/response journeys; each reaches the primary DB.
+      for(let i=0;i<6;i++) {
+        const start=.28+i*1.8, d=t-start;
+        if(d>=0&&d<.42) along('users-app','packet-user',d/.42,true);
+        else if(d>=.42&&d<1.55) along('direct-forward','packet-main',(d-.42)/1.13,true);
+        else if(d>=1.55&&d<2.25) along('direct-return','packet-return',(d-1.55)/.7,true);
+        else if(d>=2.25&&d<2.6) along('users-app','packet-user',(d-2.25)/.35,true,true);
+      }
+      $('db-node').querySelector('rect').setAttribute('stroke',dbReads>=4?'#ff7078':'#9a714b');
+      $('db-node').querySelector('rect').setAttribute('stroke-width',dbReads>=4?2.3:1.3);
+    } else {
+      $('db-node').querySelector('rect').setAttribute('stroke','#9a714b');
+      $('db-node').querySelector('rect').setAttribute('stroke-width','1.3');
+      if(setup) {
+        dbReads=0;
+        setChapter('ADDING REDIS','#8ceac1','#10251d','#3d9e79');
+        setStory('CHAPTER 02  /  ADD A MEMORY LAYER','Put Redis between the app and the database.','Redis starts empty. The first request will still need the primary database.','#8ceac1');
+        appStatus('CHECK REDIS','hit'); redisStatus('CACHE EMPTY','empty');
+        setText('path-state','APPLICATION → REDIS');
+        opacity('redis-node',ease((t-12)/2));
+      } else if(miss) {
+        const u=t-16;
+        dbReads=1;
+        setChapter(u<4?'CACHE MISS':'CACHE FILLED',u<4?'#ffc27e':'#8ceac1',u<4?'#2a2115':'#10251d',u<4?'#a8783b':'#3d9e79');
+        setStory('CHAPTER 03  /  THE FIRST REQUEST','A miss sends one request to the database.','Redis has no copy yet: GET → MISS → read the primary → SET the value → return it.','#ffc27e');
+        setText('path-state','MISS → DATABASE → REDIS');
+        if(u<1.4) { appStatus('GET product:42','none'); redisStatus('CACHE EMPTY','empty'); }
+        else if(u<3.2) { appStatus('CACHE MISS','miss'); redisStatus('MISS','miss'); }
+        else if(u<6.0) { appStatus('LOAD FROM DB','miss'); redisStatus('FETCHING VALUE','miss'); }
+        else { appStatus('VALUE RETURNED','hit'); redisStatus('KEY STORED · TTL 60s','hit'); }
+        const fill=ease((u-6.0)/.9); cacheFill(fill);
+        if(u<.45) along('users-app','packet-user',u/.45,true);
+        else if(u<1.8) along('app-redis','packet-cache',(u-.45)/1.35,true);
+        else if(u<2.4) { opacity('packet-cache',0); }
+        else if(u<4.0) along('redis-db','packet-main',(u-2.4)/1.6,true);
+        else if(u<5.4) along('db-redis','packet-main',(u-4.0)/1.4,true);
+        else if(u<6.8) { cacheFill(ease((u-5.4)/1.0)); along('redis-app','packet-return',(u-5.4)/1.4,true); }
+        else { cacheFill(1); }
+        opacity('redis-node',1);
+      } else if(hits) {
+        const u=t-26;
+        dbReads=1;
+        hitsCount=Math.min(6,Math.floor(u/1.65)+1);
+        setChapter('CACHE HIT','#8ceac1','#10251d','#3d9e79');
+        setStory('CHAPTER 04  /  REPEAT VISITS','Now Redis answers from memory.','The same product is already cached. The app gets it from Redis, so the primary database is skipped.','#8ceac1');
+        appStatus('CACHE HIT','hit'); redisStatus('HIT · IN RAM','hit'); cacheFill(1);
+        setText('path-state','APPLICATION → REDIS');
+        for(let i=0;i<7;i++) {
+          const start=.22+i*1.65, d=u-start;
+          if(d>=0&&d<.28) along('users-app','packet-user',d/.28,true);
+          else if(d>=.28&&d<.72) along('app-redis','packet-cache',(d-.28)/.44,true);
+          else if(d>=.72&&d<1.16) along('redis-app','packet-return',(d-.72)/.44,true);
+          else if(d>=1.16&&d<1.42) along('users-app','packet-user',(d-1.16)/.26,true,true);
+        }
+      } else if(invalidate) {
+        const u=t-39;
+        dbReads=2; hitsCount=7;
+        setChapter(u<3?'DATA UPDATED':'CACHE REFRESH','#b4a0ff','#1d1930','#7566ae');
+        setStory('CHAPTER 05  /  KEEP THE CACHE FRESH','When data changes, invalidate the old copy.','Update the primary database, delete the cached key, then let the next read load the fresh value.','#b4a0ff');
+        cacheFill(1-ease((u-2.0)/.7));
+        setText('db-price','$95.00');
+        setText('cache-price','$89.00  ·  TTL 60s');
+        setText('path-state','UPDATE DB → DEL CACHE');
+        appStatus(u<2?'WRITE PRODUCT':'DEL product:42','none');
+        redisStatus(u<2?'KEY STILL CACHED':u<3?'KEY DELETED':'RELOAD ON NEXT READ','miss');
+        if(u<1.6) along('direct-forward','packet-write',ease(u/1.6),true);
+        else if(u>=2&&u<2.9) along('app-redis','packet-write',ease((u-2)/.9),true);
+        else if(u>=3.0&&u<4.0) { cacheFill(0); }
+        else if(u>=4.1&&u<5.2) { along('app-redis','packet-cache',ease((u-4.1)/1.1),true); redisStatus('MISS','miss'); }
+        else if(u>=5.2&&u<6.3) { along('redis-db','packet-main',ease((u-5.2)/1.1),true); }
+        else if(u>=6.3&&u<7.0) { along('db-redis','packet-main',ease((u-6.3)/.7),true); }
+        else if(u>=7.0&&u<7.8) { cacheFill(ease((u-7.0)/.8)); along('redis-app','packet-return',ease((u-7.0)/.8),true); setText('cache-price','$95.00  ·  TTL 60s'); redisStatus('FRESH VALUE STORED','hit'); appStatus('CACHE REFILLED','hit'); }
+        else if(u>=7.8) { cacheFill(1); setText('cache-price','$95.00  ·  TTL 60s'); redisStatus('FRESH VALUE STORED','hit'); appStatus('CACHE REFILLED','hit'); }
+      } else {
+        dbReads=2; hitsCount=7;
+        setChapter('THE PAYOFF','#8ceac1','#10251d','#3d9e79');
+        setStory('CHAPTER 06  /  THE PAYOFF','Same app. Same product. Fewer database trips.','Redis serves repeated reads from memory. Your primary database remains the source of truth.','#8ceac1');
+        appStatus('CACHE HIT','hit'); redisStatus('HIT · IN RAM','hit'); cacheFill(1);
+        setText('path-state','APPLICATION → REDIS');
+      }
+    }
+    dbReadCount(dbReads); cacheHitCount(hitsCount);
+    if(t>=26) opacity('direct-label',0);
+  }
+
+  function frame(now) {
+    if(!last) last=now;
+    const dt=Math.min(.05,(now-last)/1000); last=now;
+    if(!paused) {
+      elapsed += dt;
+      if(elapsed >= TOTAL) elapsed=0;
+    }
+    draw(paused && reduced ? TOTAL-0.1 : elapsed);
+    requestAnimationFrame(frame);
+  }
+  svg.addEventListener('click',()=>{
+    paused=!paused;
+    setText('pause-label',paused?'CLICK TO RESUME':'CLICK TO PAUSE');
+    last=0;
+  });
+  window.addEventListener('keydown',e=>{
+    if(e.code==='Space' && !e.repeat) { e.preventDefault(); paused=!paused; setText('pause-label',paused?'CLICK TO RESUME':'CLICK TO PAUSE'); last=0; }
+  });
+  if(reduced) { elapsed=TOTAL-0.1; paused=true; }
+  draw(elapsed);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
